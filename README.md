@@ -236,7 +236,7 @@ plugins/                     Prebuilt WASM plugins
 
 ## Roadmap
 
-- [ ] Enterprise SSO/RBAC/Audit
+- [x] Enterprise SSO/RBAC/Audit
 - [ ] Postgres storage driver
 - [ ] WebSocket transport
 - [ ] gRPC transport
