@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/0xsaurabhx/GoPilotKit/internal/config"
 	"github.com/0xsaurabhx/GoPilotKit/internal/protocol/agui"
+	"github.com/0xsaurabhx/GoPilotKit/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -38,7 +40,7 @@ func newRootCmd() *cobra.Command {
 		Long: `GoPilotKit is a single-binary enterprise intelligence platform implementing
 AG-UI, MCP, and A2A protocols with autonomous self-improvement, persistent
 threads, and analytics. Configure everything via intelligence.yaml.`,
-	SilenceUsage: true,
+		SilenceUsage: true,
 	}
 
 	root.PersistentFlags().StringVar(&cfgPath, "config", "", "Path to configuration file (default: intelligence.yaml or $GOPILOTKIT_CONFIG)")
@@ -99,7 +101,7 @@ threads, and analytics. Configure everything via intelligence.yaml.`,
 }
 
 func runServer(cfg *config.IntelligenceConfig) error {
-	fmt.Printf("GoPilotKit starting...\n")
+	fmt.Println("GoPilotKit starting...")
 	fmt.Printf("  Profile:    %s\n", cfg.Profile)
 	fmt.Printf("  Port:       %d\n", cfg.Server.Port)
 	fmt.Printf("  Transports: %v\n", cfg.Server.Transport)
@@ -109,24 +111,26 @@ func runServer(cfg *config.IntelligenceConfig) error {
 	fmt.Printf("  Tools:      %d\n", len(cfg.Tools))
 	fmt.Println()
 
-	// Initialize AG-UI coordinator with demo handlers
-	coord := agui.DefaultCoordinator()
+	// Initialize the runtime engine — this connects providers, store, and tools.
+	engine, err := runtime.NewEngine(cfg)
+	if err != nil {
+		return fmt.Errorf("initializing runtime engine: %w", err)
+	}
+	defer engine.Close()
 
-	// Register configured agents
+	// Create the AG-UI coordinator with the real engine handler.
+	coord := agui.NewCoordinator()
 	for _, agent := range cfg.Agents {
-		if _, ok := coord.GetHandler(agent.Name); !ok {
-			// Register with the echo handler as default
-			handler, _ := coord.GetHandler("echo")
-			coord.RegisterHandler(agent.Name, handler)
-		}
+		coord.RegisterHandler(agent.Name, engine.HandleRun)
+		log.Printf("registered agent: %s (provider=%s)", agent.Name, agent.Provider)
 	}
 
-	// Create AG-UI HTTP handler
+	// Create the AG-UI HTTP handler backed by the coordinator.
 	aguiHandler := agui.NewHandler(func(req agui.RunRequest, stream *agui.RunStream) {
 		coord.ExecuteRun(context.Background(), req, stream)
 	})
 
-	// Set up HTTP server
+	// Set up HTTP server.
 	mux := http.NewServeMux()
 	mux.Handle("/", aguiHandler)
 
@@ -142,7 +146,7 @@ func runServer(cfg *config.IntelligenceConfig) error {
 		Handler: mux,
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM
+	// Graceful shutdown on SIGINT/SIGTERM.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 

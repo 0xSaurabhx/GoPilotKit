@@ -155,6 +155,7 @@ func (h *Handler) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Create run stream
 	stream := NewRunStream(runID, req.ThreadID, encoder)
+	stream.SetContext(ctx)
 
 	// Send RUN_START
 	if err := stream.SendRunStart(req.Agent, req.Meta); err != nil {

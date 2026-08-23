@@ -1,6 +1,7 @@
 package agui
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ type RunStream struct {
 	mu       sync.Mutex
 	ended    bool
 	cancelCh chan struct{}
+	ctx      context.Context
 }
 
 // NewRunStream creates a new RunStream for the given run.
@@ -24,7 +26,19 @@ func NewRunStream(runID, threadID string, encoder *SSEEncoder) *RunStream {
 		threadID: threadID,
 		encoder:  encoder,
 		cancelCh: make(chan struct{}),
+		ctx:      context.Background(),
 	}
+}
+
+// SetContext sets the context for this run stream, typically derived from the HTTP
+// request context so client disconnects cancel the run.
+func (s *RunStream) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
+
+// Context returns the run's context, which is cancelled when the client disconnects.
+func (s *RunStream) Context() context.Context {
+	return s.ctx
 }
 
 // Cancel signals the stream to stop. Safe to call from any goroutine.
@@ -34,6 +48,16 @@ func (s *RunStream) Cancel() {
 	if !s.ended {
 		close(s.cancelCh)
 	}
+}
+
+// RunID returns the run identifier.
+func (s *RunStream) RunID() string {
+	return s.runID
+}
+
+// ThreadID returns the thread identifier.
+func (s *RunStream) ThreadID() string {
+	return s.threadID
 }
 
 // Cancelled returns a channel that is closed when the stream is cancelled.
