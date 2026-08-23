@@ -1,0 +1,79 @@
+version: "v1alpha"
+profile: "personal"
+
+server:
+  port: 8080
+  transport: ["sse"]
+  cors_allowed_origins: ["*"]
+
+storage:
+  driver: "sqlite"
+  connection_uri: "./data/gopilotkit.db"
+  vector_store:
+    driver: "embedded"
+    dimension: 1536
+
+telemetry:
+  provider: "opentelemetry"
+  endpoint: "http://localhost:4318/v1/traces"
+  log_level: "info"
+
+learning:
+  enabled: true
+  containers:
+    - scope: "user"
+      min_interactions: 10
+      improvement_threshold: 0.1
+  capabilities:
+    prompt_evolution: true
+    few_shot_curation: true
+    skill_recording: true
+    memory_optimization: true
+  evaluation:
+    llm_as_judge: true
+    regression_testing: false
+    ab_testing: false
+    quality_threshold: 0.8
+  export:
+    enabled: false
+
+analytics:
+  enabled: true
+  dashboard: false
+  otlp_export: false
+  cost_tracking: true
+
+channels:
+  web: true
+  mobile: false
+  slack: false
+  teams: false
+
+enterprise:
+  sso:
+    enabled: false
+  rbac:
+    enabled: false
+  audit_log:
+    enabled: false
+  data_retention:
+    enabled: false
+
+providers:
+  - id: "primary-llm"
+    type: "openai"
+    model: "gpt-4o"
+    api_key: "${OPENAI_API_KEY}"
+
+agents:
+  - name: "personal-assistant"
+    provider: "primary-llm"
+    system_prompt: |
+      You are a helpful personal AI assistant.
+      Be concise and accurate.
+    memory:
+      sliding_window: 20
+      semantic_recall: true
+    tools: []
+
+tools: []

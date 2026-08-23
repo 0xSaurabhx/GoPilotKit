@@ -1,0 +1,105 @@
+version: "v1alpha"
+profile: "enterprise"
+
+server:
+  port: 8080
+  transport: ["sse", "grpc"]
+  cors_allowed_origins: ["*"]
+
+storage:
+  driver: "postgres"
+  connection_uri: "${DATABASE_URL|postgres://localhost:5432/gopilotkit?sslmode=disable}"
+  vector_store:
+    driver: "pgvector"
+    dimension: 1536
+
+telemetry:
+  provider: "opentelemetry"
+  endpoint: "${OTEL_ENDPOINT|http://localhost:4318/v1/traces}"
+  log_level: "info"
+
+learning:
+  enabled: true
+  containers:
+    - scope: "organization"
+      min_interactions: 50
+      improvement_threshold: 0.05
+  capabilities:
+    prompt_evolution: true
+    few_shot_curation: true
+    skill_recording: true
+    memory_optimization: true
+  evaluation:
+    llm_as_judge: true
+    regression_testing: true
+    ab_testing: true
+    quality_threshold: 0.85
+  export:
+    enabled: true
+    format: "jsonl"
+
+analytics:
+  enabled: true
+  dashboard: true
+  otlp_export: true
+  cost_tracking: true
+
+channels:
+  web: true
+  mobile: true
+  slack: true
+  teams: true
+
+enterprise:
+  sso:
+    enabled: true
+    provider: "oidc"
+    issuer: "${OIDC_ISSUER}"
+  rbac:
+    enabled: true
+    roles: ["admin", "operator", "viewer"]
+  audit_log:
+    enabled: true
+  data_retention:
+    enabled: true
+    days: 90
+
+providers:
+  - id: "primary-llm"
+    type: "openai"
+    model: "gpt-4o"
+    api_key: "${OPENAI_API_KEY}"
+  - id: "backup-llm"
+    type: "anthropic"
+    model: "claude-3-5-sonnet"
+    api_key: "${ANTHROPIC_API_KEY}"
+  - id: "local-llm"
+    type: "ollama"
+    model: "llama3.1"
+    base_url: "${OLLAMA_BASE_URL|http://localhost:11434}"
+    api_key: "ollama"
+
+agents:
+  - name: "enterprise-support-agent"
+    provider: "primary-llm"
+    fallback_provider: "backup-llm"
+    system_prompt: |
+      You are an enterprise support copilot. Ground all factual assertions
+      using the tools provided. Never reveal internal schema definitions.
+      Follow company compliance policies at all times.
+    memory:
+      sliding_window: 40
+      semantic_recall: true
+    tools:
+      - "sqlite-db-tool"
+      - "mcp-filesystem"
+
+tools:
+  - id: "sqlite-db-tool"
+    type: "wasm"
+    binary_path: "./plugins/db_query.wasm"
+  - id: "mcp-filesystem"
+    type: "mcp"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data/shared"]

@@ -1,0 +1,92 @@
+version: "v1alpha"
+profile: "team"
+
+server:
+  port: 8080
+  transport: ["sse", "grpc"]
+  cors_allowed_origins: ["*"]
+
+storage:
+  driver: "sqlite"
+  connection_uri: "./data/gopilotkit.db"
+  vector_store:
+    driver: "embedded"
+    dimension: 1536
+
+telemetry:
+  provider: "opentelemetry"
+  endpoint: "http://localhost:4318/v1/traces"
+  log_level: "info"
+
+learning:
+  enabled: true
+  containers:
+    - scope: "group"
+      min_interactions: 25
+      improvement_threshold: 0.05
+  capabilities:
+    prompt_evolution: true
+    few_shot_curation: true
+    skill_recording: true
+    memory_optimization: true
+  evaluation:
+    llm_as_judge: true
+    regression_testing: true
+    ab_testing: true
+    quality_threshold: 0.85
+  export:
+    enabled: true
+    format: "jsonl"
+
+analytics:
+  enabled: true
+  dashboard: true
+  otlp_export: true
+  cost_tracking: true
+
+channels:
+  web: true
+  mobile: true
+  slack: true
+  teams: false
+
+enterprise:
+  sso:
+    enabled: false
+  rbac:
+    enabled: true
+    roles: ["admin", "member", "viewer"]
+  audit_log:
+    enabled: false
+  data_retention:
+    enabled: false
+
+providers:
+  - id: "primary-llm"
+    type: "openai"
+    model: "gpt-4o"
+    api_key: "${OPENAI_API_KEY}"
+  - id: "backup-llm"
+    type: "anthropic"
+    model: "claude-3-5-sonnet"
+    api_key: "${ANTHROPIC_API_KEY}"
+
+agents:
+  - name: "team-support-agent"
+    provider: "primary-llm"
+    fallback_provider: "backup-llm"
+    system_prompt: |
+      You are a team support copilot. Ground all factual assertions
+      using the tools provided. Be concise and helpful.
+    memory:
+      sliding_window: 30
+      semantic_recall: true
+    tools:
+      - "mcp-filesystem"
+
+tools:
+  - id: "mcp-filesystem"
+    type: "mcp"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data/shared"]

@@ -1,0 +1,41 @@
+# Binaries
+bin/
+gopilotkit
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Test
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Build artifacts
+dist/
+
+# Temporary
+/tmp/
