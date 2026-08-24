@@ -21,10 +21,10 @@ import (
 
 // JSONRPCRequest is a JSON-RPC 2.0 request.
 type JSONRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      interface{}   `json:"id"`
-	Method  string        `json:"method"`
-	Params  interface{}   `json:"params,omitempty"`
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
 }
 
 // JSONRPCResponse is a JSON-RPC 2.0 response.
@@ -37,8 +37,8 @@ type JSONRPCResponse struct {
 
 // JSONRPCError is a JSON-RPC 2.0 error.
 type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
 
@@ -74,22 +74,25 @@ type ToolContent struct {
 
 // StdioConfig configures a stdio-based MCP server connection.
 type StdioConfig struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-	Env     []string `json:"env,omitempty"`
+	Command string        `json:"command"`
+	Args    []string      `json:"args,omitempty"`
+	Env     []string      `json:"env,omitempty"`
 	Timeout time.Duration `json:"timeout"`
 }
 
 // Client communicates with an MCP server over stdio.
 type Client struct {
-	config    StdioConfig
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Scanner
-	mu        sync.Mutex
-	id        int
-	responses map[int]*JSONRPCResponse
-	ready     bool
+	config StdioConfig
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+	mu     sync.Mutex
+	id     int
+	ready  bool
+
+	// Response routing: the reader goroutine sends responses here,
+	// and sendRequest reads from it.
+	respCh chan JSONRPCResponse
 }
 
 // NewClient creates a new MCP client for stdio transport.
@@ -98,15 +101,14 @@ func NewClient(cfg StdioConfig) *Client {
 		cfg.Timeout = 30 * time.Second
 	}
 	return &Client{
-		config:    cfg,
-		responses: make(map[int]*JSONRPCResponse),
+		config: cfg,
+		respCh: make(chan JSONRPCResponse, 16),
 	}
 }
 
 // Connect starts the MCP server process and performs the initialize handshake.
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...)
 	if len(c.config.Env) > 0 {
@@ -116,25 +118,28 @@ func (c *Client) Connect(ctx context.Context) error {
 	var err error
 	c.stdin, err = c.cmd.StdinPipe()
 	if err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("mcp: creating stdin pipe: %w", err)
 	}
 
 	stdoutPipe, err := c.cmd.StdoutPipe()
 	if err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("mcp: creating stdout pipe: %w", err)
 	}
 	c.stdout = bufio.NewScanner(stdoutPipe)
 
 	// Start the process.
 	if err := c.cmd.Start(); err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("mcp: starting server: %w", err)
 	}
 
-	// Start the response reader.
+	// Start the response reader goroutine.
 	go c.readResponses()
 
-	// Perform initialize handshake.
-	initResult, err := c.sendRequest("initialize", map[string]interface{}{
+	// Perform initialize handshake (synchronous — uses c.respCh directly).
+	initResult, err := c.sendRequestInternal("initialize", map[string]interface{}{
 		"protocolVersion": "2025-03-26",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]string{
@@ -143,6 +148,8 @@ func (c *Client) Connect(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		// Release mutex before Close to avoid deadlock.
+		c.mu.Unlock()
 		c.Close()
 		return fmt.Errorf("mcp: initialize failed: %w", err)
 	}
@@ -152,6 +159,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.sendNotification("notifications/initialized", nil)
 
 	c.ready = true
+	c.mu.Unlock()
 	log.Printf("mcp: connected to %s", c.config.Command)
 	return nil
 }
@@ -165,7 +173,7 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 		return nil, fmt.Errorf("mcp: not connected")
 	}
 
-	result, err := c.sendRequestLocked("tools/list", nil)
+	result, err := c.sendRequestInternal("tools/list", nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: listing tools: %w", err)
 	}
@@ -189,7 +197,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 		return nil, fmt.Errorf("mcp: not connected")
 	}
 
-	result, err := c.sendRequestLocked("tools/call", map[string]interface{}{
+	result, err := c.sendRequestInternal("tools/call", map[string]interface{}{
 		"name":      name,
 		"arguments": args,
 	})
@@ -206,20 +214,19 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 }
 
 // Close shuts down the MCP server process.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.ready = false
-
+// Safe to call multiple times. Does NOT acquire c.mu — the caller
+// must not hold the lock when calling Close.
+func (c *Client) Close() {
 	if c.stdin != nil {
 		c.stdin.Close()
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		c.cmd.Wait() // Wait for process to exit so stdout reader goroutine terminates.
 	}
-	return nil
+	c.mu.Lock()
+	c.ready = false
+	c.mu.Unlock()
 }
 
 // IsReady returns whether the client is connected and ready.
@@ -229,13 +236,10 @@ func (c *Client) IsReady() bool {
 	return c.ready
 }
 
-// sendRequest sends a JSON-RPC request and waits for the response.
-func (c *Client) sendRequest(method string, params interface{}) (json.RawMessage, error) {
-	return c.sendRequestLocked(method, params)
-}
-
-// sendRequestLocked sends a request while the mutex is held.
-func (c *Client) sendRequestLocked(method string, params interface{}) (json.RawMessage, error) {
+// sendRequestInternal sends a JSON-RPC request and waits for the matching response.
+// Must be called with c.mu held. Releases c.mu while waiting for the response
+// so that the readResponses goroutine can route incoming messages.
+func (c *Client) sendRequestInternal(method string, params interface{}) (json.RawMessage, error) {
 	c.id++
 	reqID := c.id
 
@@ -256,36 +260,28 @@ func (c *Client) sendRequestLocked(method string, params interface{}) (json.RawM
 		return nil, fmt.Errorf("writing request: %w", err)
 	}
 
-	// Wait for the response with a timeout.
+	// Release the mutex while waiting for the response so that the
+	// readResponses goroutine can route incoming messages.
+	c.mu.Unlock()
+
 	deadline := time.After(c.config.Timeout)
 	for {
 		select {
-		case <-deadline:
-			return nil, fmt.Errorf("timeout waiting for response to %s", method)
-		default:
-			// Check if we have a response for this ID.
-			// In a real implementation, this would use a condition variable.
-			time.Sleep(5 * time.Millisecond)
-
-			// Read any available data from stdout.
-			if c.stdout.Scan() {
-				line := c.stdout.Text()
-				var resp JSONRPCResponse
-				if err := json.Unmarshal([]byte(line), &resp); err != nil {
-					continue
+		case resp := <-c.respCh:
+			// Check if this is our response.
+			if id, ok := resp.ID.(float64); ok && int(id) == reqID {
+				if resp.Error != nil {
+					c.mu.Lock()
+					return nil, fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
 				}
-				// Check if this is our response.
-				if id, ok := resp.ID.(float64); ok && int(id) == reqID {
-					if resp.Error != nil {
-						return nil, fmt.Errorf("JSON-RPC error %d: %s", resp.Error.Code, resp.Error.Message)
-					}
-					return resp.Result, nil
-				}
-				// Store for later matching.
-				if respID, ok := resp.ID.(float64); ok {
-					c.responses[int(respID)] = &resp
-				}
+				c.mu.Lock()
+				return resp.Result, nil
 			}
+			// Not ours — discard (responses arrive in order for stdio,
+			// so this shouldn't happen in practice).
+		case <-deadline:
+			c.mu.Lock()
+			return nil, fmt.Errorf("timeout waiting for response to %s", method)
 		}
 	}
 }
@@ -304,7 +300,7 @@ func (c *Client) sendNotification(method string, params interface{}) {
 	c.stdin.Write(data)
 }
 
-// readResponses reads responses from stdout in a goroutine.
+// readResponses reads responses from stdout and routes them to respCh.
 func (c *Client) readResponses() {
 	for c.stdout.Scan() {
 		line := c.stdout.Text()
@@ -312,11 +308,7 @@ func (c *Client) readResponses() {
 		if err := json.Unmarshal([]byte(line), &resp); err != nil {
 			continue
 		}
-		c.mu.Lock()
-		if id, ok := resp.ID.(float64); ok {
-			c.responses[int(id)] = &resp
-		}
-		c.mu.Unlock()
+		c.respCh <- resp
 	}
 }
 
@@ -324,52 +316,105 @@ func (c *Client) readResponses() {
 
 // ServerConfig configures an MCP server connection.
 type ServerConfig struct {
-	ID      string     `json:"id"`
-	Command string     `json:"command"`
-	Args    []string   `json:"args,omitempty"`
-	Timeout time.Duration `json:"timeout"`
+	ID        string        `json:"id"`
+	Command   string        `json:"command,omitempty"`
+	Args      []string      `json:"args,omitempty"`
+	Transport string        `json:"transport,omitempty"` // "stdio", "sse", "grpc"
+	BaseURL   string        `json:"base_url,omitempty"`   // For SSE transport
+	Timeout   time.Duration `json:"timeout"`
 }
 
 // Host manages connections to multiple MCP servers.
 type Host struct {
-	servers map[string]*Client
-	configs map[string]ServerConfig
-	mu      sync.RWMutex
+	servers    map[string]*Client
+	sseClients map[string]*SSEClient
+	configs    map[string]ServerConfig
+	mu         sync.RWMutex
 }
 
 // NewHost creates a new MCP host.
 func NewHost() *Host {
 	return &Host{
-		servers: make(map[string]*Client),
-		configs: make(map[string]ServerConfig),
+		servers:    make(map[string]*Client),
+		sseClients: make(map[string]*SSEClient),
+		configs:    make(map[string]ServerConfig),
 	}
 }
 
-// ConnectServer connects to an MCP server.
+// ConnectServer connects to an MCP server using the configured transport.
 func (h *Host) ConnectServer(ctx context.Context, cfg ServerConfig) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	client := NewClient(StdioConfig{
-		Command: cfg.Command,
-		Args:    cfg.Args,
-		Timeout: cfg.Timeout,
-	})
-
-	if err := client.Connect(ctx); err != nil {
-		return fmt.Errorf("connecting to MCP server %q: %w", cfg.ID, err)
+	transport := cfg.Transport
+	if transport == "" {
+		transport = "stdio" // Default to stdio.
 	}
 
-	h.servers[cfg.ID] = client
+	var client *Client
+
+	switch transport {
+	case "sse":
+		// For SSE transport, we wrap the SSEClient as a regular Client
+		// by connecting via a different code path.
+		sseClient := NewSSEClient(SSEConfig{
+			BaseURL: cfg.BaseURL,
+			Timeout: cfg.Timeout,
+		})
+		if err := sseClient.Connect(ctx); err != nil {
+			return fmt.Errorf("connecting to MCP server %q via SSE: %w", cfg.ID, err)
+		}
+		// Store as SSE client in a separate map.
+		h.sseClients[cfg.ID] = sseClient
+		h.configs[cfg.ID] = cfg
+		log.Printf("mcp: connected to %q via SSE (base_url=%s)", cfg.ID, cfg.BaseURL)
+		return nil
+
+	case "grpc":
+		return fmt.Errorf("connecting to MCP server %q: gRPC transport not yet available", cfg.ID)
+
+	case "stdio", "":
+		client = NewClient(StdioConfig{
+			Command: cfg.Command,
+			Args:    cfg.Args,
+			Timeout: cfg.Timeout,
+		})
+		if err := client.Connect(ctx); err != nil {
+			return fmt.Errorf("connecting to MCP server %q via stdio: %w", cfg.ID, err)
+		}
+		h.servers[cfg.ID] = client
+
+	default:
+		return fmt.Errorf("unsupported MCP transport %q for server %q", transport, cfg.ID)
+	}
+
 	h.configs[cfg.ID] = cfg
+	log.Printf("mcp: connected to %q via %s", cfg.ID, transport)
 	return nil
 }
 
-// GetClient returns the MCP client for a server.
+// HasServer returns true if a server with the given ID is connected.
+func (h *Host) HasServer(serverID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, stdioOk := h.servers[serverID]
+	_, sseOk := h.sseClients[serverID]
+	return stdioOk || sseOk
+}
+
+// GetClient returns the stdio MCP client for a server.
 func (h *Host) GetClient(serverID string) (*Client, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	c, ok := h.servers[serverID]
+	return c, ok
+}
+
+// GetSSEClient returns the SSE MCP client for a server.
+func (h *Host) GetSSEClient(serverID string) (*SSEClient, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	c, ok := h.sseClients[serverID]
 	return c, ok
 }
 
@@ -389,12 +434,13 @@ func (h *Host) CloseAll() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	var firstErr error
-	for id, client := range h.servers {
-		if err := client.Close(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("closing server %q: %w", id, err)
-		}
+	for _, client := range h.servers {
+		client.Close()
+	}
+	for _, client := range h.sseClients {
+		client.Close()
 	}
 	h.servers = make(map[string]*Client)
-	return firstErr
+	h.sseClients = make(map[string]*SSEClient)
+	return nil
 }

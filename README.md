@@ -236,11 +236,35 @@ plugins/                     Prebuilt WASM plugins
 
 ## Roadmap
 
-- [x] Enterprise SSO/RBAC/Audit
+### Completed
+
+- [x] AG-UI streaming protocol with SSE and HITL interrupts
+- [x] MCP host with JSON-RPC 2.0 and stdio transport
+- [x] A2A agent-to-agent protocol with Agent Cards and delegation
+- [x] Autonomous self-improvement engine (signals, evaluation, prompt evolution, few-shot, skills, memory)
+- [x] SQLite WAL storage with thread management
+- [x] Guardrails: PII scrubbing, content filtering, blocked words, input/output validation
+- [x] Analytics dashboard with OTLP export
+- [x] Cost management: token counting, budgets, rate limiting
+- [x] Semantic caching with TF-IDF similarity
+- [x] Multi-channel adapters: Web, Slack, Teams, Mobile
+- [x] LLM providers: OpenAI, Anthropic, Ollama with circuit breaker and fallback
+- [x] Agentic RAG with chunking and retrieval
+- [x] WASM plugin system with sandboxed execution
+- [x] CLI with run, validate, version commands
+- [x] REST API with SSE event streaming
+- [x] Enterprise SSO, RBAC, and audit logging
+
+### Upcoming
+
 - [ ] Postgres storage driver
 - [ ] WebSocket transport
 - [ ] gRPC transport
 - [ ] Embedding-based vector cache (OpenAI embeddings)
+- [ ] Batch processing mode
+- [ ] Multi-agent orchestration workflows
+- [ ] Prometheus/Grafana metrics endpoint
+- [ ] Plugin marketplace
 
 ## Contributing
 

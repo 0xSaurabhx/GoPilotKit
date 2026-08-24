@@ -7,14 +7,17 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/0xsaurabhx/GoPilotKit/internal/config"
+	"github.com/0xsaurabhx/GoPilotKit/internal/mcp"
 	"github.com/0xsaurabhx/GoPilotKit/internal/protocol/agui"
 	"github.com/0xsaurabhx/GoPilotKit/internal/provider"
+	"github.com/0xsaurabhx/GoPilotKit/internal/store/analytics"
 	"github.com/0xsaurabhx/GoPilotKit/internal/store/threads"
 )
 
@@ -25,13 +28,15 @@ const (
 )
 
 // Engine is the runtime orchestrator. It wires together the LLM providers,
-// thread store, and tool executor to handle agent runs end-to-end.
+// thread store, tool executor, and learning pipeline to handle agent runs end-to-end.
 type Engine struct {
 	providers map[string]provider.Provider   // provider ID → provider
 	fallbacks map[string]provider.Provider   // agent name → fallback provider (wrapped)
 	store     threads.Store
 	agents    map[string]*config.AgentConfig // agent name → config
 	tools     *ToolExecutor
+	mcpHost   *mcp.Host
+	learning  *LearningPipeline
 
 	// Default sliding window for conversation history.
 	defaultWindowSize int
@@ -93,16 +98,73 @@ func NewEngine(cfg *config.IntelligenceConfig) (*Engine, error) {
 			return nil, fmt.Errorf("opening thread store: %w", err)
 		}
 		e.store = store
+	case "postgres":
+		store, err := threads.NewPostgresStore(cfg.Storage.ConnectionURI)
+		if err != nil {
+			e.Close()
+			return nil, fmt.Errorf("opening thread store: %w", err)
+		}
+		e.store = store
 	default:
 		e.Close()
 		return nil, fmt.Errorf("unsupported storage driver: %s", cfg.Storage.Driver)
 	}
 
-	// Initialize tool executor (currently a stub; real tools need MCP/WASM).
-	e.tools = NewToolExecutor(cfg.Tools)
+	// Initialize MCP host and connect to configured MCP servers.
+	e.mcpHost = mcp.NewHost()
+	mcpMap := make(map[string]string) // tool ID → server ID
+	for _, toolCfg := range cfg.Tools {
+		if toolCfg.Type != "mcp" {
+			continue
+		}
+		// Group tools by command: tools sharing the same command share one MCP server.
+		serverID := fmt.Sprintf("mcp-%s", toolCfg.ID)
+		mcpMap[toolCfg.ID] = serverID
+		if !e.mcpHost.HasServer(serverID) {
+			log.Printf("runtime: connecting MCP server %q (cmd=%s)", serverID, toolCfg.Command)
+			if err := e.mcpHost.ConnectServer(context.Background(), mcp.ServerConfig{
+				ID:      serverID,
+				Command: toolCfg.Command,
+				Args:    toolCfg.Args,
+				Timeout: 30 * time.Second,
+			}); err != nil {
+				log.Printf("runtime: WARNING: failed to connect MCP server %q: %v (will retry lazily)", serverID, err)
+			}
+		}
+	}
 
-	log.Printf("runtime: engine ready (providers=%d, agents=%d, tools=%d)",
-		len(e.providers), len(e.agents), len(cfg.Tools))
+	// Initialize tool executor with MCP host.
+	e.tools = NewToolExecutor(cfg.Tools, e.mcpHost)
+	e.tools.SetMCPMap(mcpMap)
+
+	// Load WASM tool modules.
+	for _, toolCfg := range cfg.Tools {
+		if toolCfg.Type != "wasm" {
+			continue
+		}
+		if err := e.tools.LoadWASMModule(context.Background(), toolCfg.ID, toolCfg.BinaryPath, 30*time.Second); err != nil {
+			log.Printf("runtime: WARNING: failed to load WASM tool %q: %v (will retry lazily)", toolCfg.ID, err)
+		}
+	}
+
+	// Initialize learning pipeline.
+	var analyticsStore *analytics.Store
+	if cfg.Analytics.Enabled {
+		analyticsStore = analytics.NewStore(analytics.Config{
+			Enabled:       true,
+			RetentionDays: 30,
+			MaxEvents:     100000,
+		})
+	}
+	e.learning = NewLearningPipeline(analyticsStore)
+
+	// Register agent prompts for evolution tracking.
+	for _, ac := range cfg.Agents {
+		e.learning.InitAgentPrompt(ac.Name, ac.SystemPrompt)
+	}
+
+	log.Printf("runtime: engine ready (providers=%d, agents=%d, tools=%d, learning=%v)",
+		len(e.providers), len(e.agents), len(cfg.Tools), e.learning.Enabled)
 
 	return e, nil
 }
@@ -143,6 +205,9 @@ func (e *Engine) HandleRun(req agui.RunRequest, stream *agui.RunStream) {
 		// Non-fatal — continue with the run.
 	}
 
+	// Record run start in learning pipeline.
+	e.learning.RunStarted(runID, threadID, req.Agent)
+
 	// Persist run record.
 	now := time.Now().UTC()
 	runRecord := &threads.Run{
@@ -178,10 +243,19 @@ func (e *Engine) HandleRun(req agui.RunRequest, stream *agui.RunStream) {
 		runRecord.Status = "error"
 		runRecord.Error = err.Error()
 		_ = e.store.UpdateRun(runRecord)
+		e.learning.RunFailed(runID, threadID, req.Agent, err.Error())
 		return
 	}
 	runRecord.Status = "completed"
 	_ = e.store.UpdateRun(runRecord)
+
+	// Record completion in learning pipeline.
+	totalTokens := 0
+	if usage != nil {
+		totalTokens = usage.TotalTokens
+	}
+	durationMs := endTime.Sub(now).Milliseconds()
+	e.learning.RunCompleted(runID, threadID, req.Agent, req.Message, "", false, totalTokens, 0, durationMs)
 
 	// Send RUN_END with token usage.
 	_ = stream.SendRunEnd(usage)
@@ -425,6 +499,12 @@ func (e *Engine) Close() error {
 			firstErr = err
 		}
 	}
+	if e.mcpHost != nil {
+		if err := e.mcpHost.CloseAll(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	e.tools.Close()
 	return firstErr
 }
 

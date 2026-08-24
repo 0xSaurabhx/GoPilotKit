@@ -1,6 +1,9 @@
 package analytics
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -116,16 +119,74 @@ func TestPurgeOld(t *testing.T) {
 }
 
 func TestOTLPExport(t *testing.T) {
+	// Set up a mock OTLP collector.
+	var receivedPayload otlpPayload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/logs" {
+			t.Errorf("expected /v1/logs, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("expected application/json content type, got %s", r.Header.Get("Content-Type"))
+		}
+		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
 	store := NewStore(Config{Enabled: true})
 
-	store.RecordEvent(Event{Type: "run_start", Agent: "a", RunID: "r1"})
+	store.RecordEvent(Event{Type: "run_start", Agent: "a", RunID: "r1", TokensUsed: 42, CostUSD: 0.001})
 
-	events, err := store.OTLPExport("http://localhost:4318", time.Time{})
+	events, err := store.OTLPExport(server.URL, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(events) != 1 {
 		t.Errorf("expected 1 event, got %d", len(events))
+	}
+
+	// Verify the OTLP payload structure.
+	if len(receivedPayload.ResourceLogs) != 1 {
+		t.Fatalf("expected 1 ResourceLogs, got %d", len(receivedPayload.ResourceLogs))
+	}
+	rls := receivedPayload.ResourceLogs[0]
+	if len(rls.Resource.Attributes) == 0 {
+		t.Error("expected resource attributes")
+	}
+	if len(rls.ScopeLogs) != 1 {
+		t.Fatalf("expected 1 ScopeLogs, got %d", len(rls.ScopeLogs))
+	}
+	if len(rls.ScopeLogs[0].LogRecords) != 1 {
+		t.Fatalf("expected 1 LogRecord, got %d", len(rls.ScopeLogs[0].LogRecords))
+	}
+
+	record := rls.ScopeLogs[0].LogRecords[0]
+	if record.Body.StringValue != "run_start" {
+		t.Errorf("expected body 'run_start', got %s", record.Body.StringValue)
+	}
+	if record.TimeUnixNano == "" {
+		t.Error("expected non-empty timeUnixNano")
+	}
+
+	// Verify attributes.
+	attrMap := make(map[string]otlpAnyValue)
+	for _, a := range record.Attributes {
+		attrMap[a.Key] = a.Value
+	}
+	if attrMap["event.agent"].StringValue != "a" {
+		t.Errorf("expected agent 'a', got %s", attrMap["event.agent"].StringValue)
+	}
+	if attrMap["event.run_id"].StringValue != "r1" {
+		t.Errorf("expected run_id 'r1', got %s", attrMap["event.run_id"].StringValue)
+	}
+	if attrMap["event.tokens_used"].IntValue != 42 {
+		t.Errorf("expected tokens_used 42, got %d", attrMap["event.tokens_used"].IntValue)
+	}
+	if attrMap["event.cost_usd"].DoubleValue != 0.001 {
+		t.Errorf("expected cost_usd 0.001, got %f", attrMap["event.cost_usd"].DoubleValue)
 	}
 }
 

@@ -8,6 +8,16 @@ import (
 	"sync"
 )
 
+// EventEncoder is the interface for writing AG-UI events to a transport.
+// Both SSEEncoder (HTTP SSE) and WSEncoder (WebSocket) implement this.
+type EventEncoder interface {
+	WriteEvent(evt Event) error
+	WriteRaw(eventType string, data []byte) error
+	WriteComment(comment string) error
+	Close()
+	IsClosed() bool
+}
+
 // SSEEncoder writes AG-UI events in SSE format over an http.ResponseWriter.
 //
 // SSE format:
