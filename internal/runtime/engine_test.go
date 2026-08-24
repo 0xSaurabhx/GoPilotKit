@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +104,7 @@ func mockOpenAIToolServer(t *testing.T, toolOutput, finalResponse string) *httpt
 
 		if callCount == 1 {
 			// First call: request a tool call.
-			chunk := `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_001","type":"function","function":{"name":"test-tool","arguments":"{\"query\":\"test\"}"}}]},"finish_reason":null}],"usage":null}`
+			chunk := `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_001","type":"function","function":{"name":"echo","arguments":"{\"text\":\"hello from tool\"}"}}]},"finish_reason":null}],"usage":null}`
 			fmt.Fprintf(w, "data: %s\n\n", chunk)
 			flusher.Flush()
 
@@ -346,7 +349,11 @@ func TestEngineMissingAgent(t *testing.T) {
 }
 
 func TestEngineToolCallLoop(t *testing.T) {
-	// Set up a mock server that requests a tool call, then responds with text.
+	// Build the real mock MCP server.
+	mcpBinary := buildMockMCPServer(t)
+
+	// Set up a mock server that requests the "echo" tool, then responds with text.
+	// The mock LLM requests "echo" which is a real tool on the mock MCP server.
 	server := mockOpenAIToolServer(t, `{"result":"tool output"}`, "Based on the tool result, here is my answer.")
 	defer server.Close()
 
@@ -376,7 +383,7 @@ func TestEngineToolCallLoop(t *testing.T) {
 			},
 		},
 		Tools: []config.ToolConfig{
-			{ID: "test-tool", Type: "mcp", Transport: "stdio", Command: "echo"},
+			{ID: "echo", Type: "mcp", Transport: "stdio", Command: mcpBinary},
 		},
 	}
 
@@ -414,18 +421,17 @@ func TestEngineToolCallLoop(t *testing.T) {
 		t.Error("expected TOOL_OUTPUT event")
 	}
 
-	// The stub tool returns a JSON error message (not a Go error),
-	// so is_error is false — the tool "executed" but reported unavailability.
+	// The tool should have executed successfully via the real MCP server.
 	for _, e := range events {
 		if typ, ok := e["type"].(string); ok && typ == "TOOL_OUTPUT" {
 			isError, _ := e["is_error"].(bool)
 			if isError {
-				t.Error("expected tool output is_error=false for stub (tool succeeded, just unavailable)")
+				t.Error("expected tool output is_error=false (successful MCP execution)")
 			}
 		}
 	}
 
-	// Verify we still got a final text response after the tool round.
+	// Verify we got a final text response after the tool round.
 	if !eventType(events, "TEXT_END") {
 		t.Error("expected TEXT_END event")
 	}
@@ -438,6 +444,20 @@ func TestEngineToolCallLoop(t *testing.T) {
 	if len(textChunks) == 0 {
 		t.Error("expected non-empty text response after tool call")
 	}
+}
+
+// buildMockMCPServer compiles the mock MCP server test binary.
+func buildMockMCPServer(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "mock_mcp_server")
+	src := filepath.Join("..", "mcp", "testdata", "mock_mcp_server.go")
+	cmd := exec.Command("go", "build", "-o", binary, src)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to build mock MCP server: %v", err)
+	}
+	return binary
 }
 
 func TestEngineThreadPersistence(t *testing.T) {
@@ -619,7 +639,7 @@ func TestToolExecutorHasTool(t *testing.T) {
 	te := NewToolExecutor([]config.ToolConfig{
 		{ID: "tool-a", Type: "mcp", Transport: "stdio", Command: "echo"},
 		{ID: "tool-b", Type: "wasm", BinaryPath: "/path/to/binary.wasm"},
-	})
+	}, nil)
 
 	if !te.HasTool("tool-a") {
 		t.Error("expected tool-a to exist")
@@ -638,7 +658,7 @@ func TestToolExecutorHasTool(t *testing.T) {
 }
 
 func TestToolExecutorExecuteUnknownTool(t *testing.T) {
-	te := NewToolExecutor([]config.ToolConfig{})
+	te := NewToolExecutor([]config.ToolConfig{}, nil)
 	_, err := te.Execute(context.Background(), "nonexistent", "{}")
 	if err == nil {
 		t.Error("expected error for unknown tool")
@@ -649,22 +669,17 @@ func TestToolExecutorExecuteUnknownTool(t *testing.T) {
 }
 
 func TestToolExecutorExecuteStub(t *testing.T) {
+	// No MCP host configured — should fail with clear error.
 	te := NewToolExecutor([]config.ToolConfig{
 		{ID: "my-tool", Type: "mcp", Transport: "stdio", Command: "echo"},
-	})
+	}, nil)
 
-	output, err := te.Execute(context.Background(), "my-tool", `{"query":"test"}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := te.Execute(context.Background(), "my-tool", `{"query":"test"}`)
+	if err == nil {
+		t.Fatal("expected error when no MCP host is configured")
 	}
-
-	// Should return an error message about MCP not being wired.
-	var result map[string]interface{}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("failed to parse output: %v", err)
-	}
-	if _, ok := result["error"]; !ok {
-		t.Error("expected error field in stub output")
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' in error, got: %v", err)
 	}
 }
 

@@ -8,11 +8,11 @@ import (
 )
 
 // RunStream provides a high-level API for writing AG-UI events during an agent run.
-// It wraps an SSEEncoder and manages the run lifecycle, including HITL interrupts.
+// It wraps an EventEncoder and manages the run lifecycle, including HITL interrupts.
 type RunStream struct {
 	runID    string
 	threadID string
-	encoder  *SSEEncoder
+	encoder  EventEncoder
 	mu       sync.Mutex
 	ended    bool
 	cancelCh chan struct{}
@@ -20,7 +20,7 @@ type RunStream struct {
 }
 
 // NewRunStream creates a new RunStream for the given run.
-func NewRunStream(runID, threadID string, encoder *SSEEncoder) *RunStream {
+func NewRunStream(runID, threadID string, encoder EventEncoder) *RunStream {
 	return &RunStream{
 		runID:    runID,
 		threadID: threadID,

@@ -39,3 +39,6 @@ dist/
 
 # Temporary
 /tmp/
+
+# Local tooling
+.freebuff/

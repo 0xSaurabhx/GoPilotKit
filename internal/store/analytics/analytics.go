@@ -5,8 +5,12 @@
 package analytics
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -227,17 +231,141 @@ func (s *Store) GetTotalCost() float64 {
 	return total
 }
 
-// OTLPExport returns events formatted for OTLP export.
-// In a real implementation, this would send to an OTLP collector.
+// OTLPExport sends analytics events to an OTLP collector via HTTP.
+// The endpoint should be the OTLP HTTP receiver URL, e.g. "http://localhost:4318".
+// Events are converted to OTLP log records and sent in batches.
 func (s *Store) OTLPExport(endpoint string, since time.Time) ([]Event, error) {
 	events := s.QueryEvents(EventQuery{Since: since, Limit: 1000})
 	if len(events) == 0 {
 		return nil, nil
 	}
 
-	// TODO: Send to OTLP endpoint via HTTP/gRPC.
-	// For now, return the events for the caller to handle.
+	// Convert events to OTLP log payload.
+	payload := buildOTLPPayload(events)
+
+	// Send to the OTLP collector.
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("otlp: marshaling payload: %w", err)
+	}
+
+	url := endpoint + "/v1/logs"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("otlp: creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("otlp: sending to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("otlp: collector returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	log.Printf("otlp: exported %d events to %s", len(events), url)
 	return events, nil
+}
+
+// otlpPayload is the OTLP JSON export payload for logs.
+type otlpPayload struct {
+	ResourceLogs []otlpResourceLogs `json:"resourceLogs"`
+}
+
+// otlpResourceLogs groups log records by resource.
+type otlpResourceLogs struct {
+	Resource  otlpResource    `json:"resource"`
+	ScopeLogs []otlpScopeLogs `json:"scopeLogs"`
+}
+
+// otlpResource describes the service emitting the logs.
+type otlpResource struct {
+	Attributes []otlpAttribute `json:"attributes"`
+}
+
+// otlpScopeLogs groups log records by instrumentation scope.
+type otlpScopeLogs struct {
+	Scope     otlpScope      `json:"scope"`
+	LogRecords []otlpLogRecord `json:"logRecords"`
+}
+
+// otlpScope identifies the instrumentation scope.
+type otlpScope struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// otlpLogRecord is a single OTLP log record.
+type otlpLogRecord struct {
+	TimeUnixNano string           `json:"timeUnixNano"`
+	Body         otlpAnyValue    `json:"body"`
+	Attributes   []otlpAttribute `json:"attributes"`
+}
+
+// otlpAttribute is a key-value pair.
+type otlpAttribute struct {
+	Key   string       `json:"key"`
+	Value otlpAnyValue `json:"value"`
+}
+
+// otlpAnyValue holds a typed value.
+type otlpAnyValue struct {
+	StringValue  string  `json:"stringValue,omitempty"`
+	IntValue     int64   `json:"intValue,omitempty"`
+	DoubleValue  float64 `json:"doubleValue,omitempty"`
+}
+
+// buildOTLPPayload converts analytics events to OTLP log format.
+func buildOTLPPayload(events []Event) otlpPayload {
+	logRecords := make([]otlpLogRecord, 0, len(events))
+	for _, evt := range events {
+		record := otlpLogRecord{
+			TimeUnixNano: fmt.Sprintf("%d", evt.Timestamp.UnixNano()),
+			Body:         otlpAnyValue{StringValue: evt.Type},
+			Attributes: []otlpAttribute{
+				{Key: "event.id", Value: otlpAnyValue{StringValue: evt.ID}},
+				{Key: "event.run_id", Value: otlpAnyValue{StringValue: evt.RunID}},
+				{Key: "event.thread_id", Value: otlpAnyValue{StringValue: evt.ThreadID}},
+				{Key: "event.agent", Value: otlpAnyValue{StringValue: evt.Agent}},
+			},
+		}
+		if evt.UserID != "" {
+			record.Attributes = append(record.Attributes, otlpAttribute{Key: "event.user_id", Value: otlpAnyValue{StringValue: evt.UserID}})
+		}
+		if evt.OrgID != "" {
+			record.Attributes = append(record.Attributes, otlpAttribute{Key: "event.org_id", Value: otlpAnyValue{StringValue: evt.OrgID}})
+		}
+		if evt.DurationMs > 0 {
+			record.Attributes = append(record.Attributes, otlpAttribute{Key: "event.duration_ms", Value: otlpAnyValue{IntValue: evt.DurationMs}})
+		}
+		if evt.TokensUsed > 0 {
+			record.Attributes = append(record.Attributes, otlpAttribute{Key: "event.tokens_used", Value: otlpAnyValue{IntValue: int64(evt.TokensUsed)}})
+		}
+		if evt.CostUSD > 0 {
+			record.Attributes = append(record.Attributes, otlpAttribute{Key: "event.cost_usd", Value: otlpAnyValue{DoubleValue: evt.CostUSD}})
+		}
+		logRecords = append(logRecords, record)
+	}
+
+	return otlpPayload{
+		ResourceLogs: []otlpResourceLogs{{
+			Resource: otlpResource{
+				Attributes: []otlpAttribute{
+					{Key: "service.name", Value: otlpAnyValue{StringValue: "gopilotkit"}},
+					{Key: "service.version", Value: otlpAnyValue{StringValue: "v1alpha"}},
+				},
+			},
+			ScopeLogs: []otlpScopeLogs{{
+				Scope:     otlpScope{Name: "gopilotkit-analytics", Version: "1.0.0"},
+				LogRecords: logRecords,
+			}},
+		}},
+	}
 }
 
 // PurgeOld removes events older than the retention period.

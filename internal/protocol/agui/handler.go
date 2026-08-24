@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/0xsaurabhx/GoPilotKit/internal/store/analytics"
 )
 
 // RunRequest is the incoming request to start an agent run.
@@ -24,9 +27,10 @@ type RunFunc func(req RunRequest, stream *RunStream)
 
 // Handler serves the AG-UI SSE streaming protocol.
 type Handler struct {
-	runFunc RunFunc
-	mu      sync.RWMutex
-	runs    map[string]*RunState
+	runFunc  RunFunc
+	mu       sync.RWMutex
+	runs     map[string]*RunState
+	analytics *analytics.Store
 }
 
 // RunState tracks the state of an active run.
@@ -61,6 +65,15 @@ func NewHandler(runFunc RunFunc) *Handler {
 	}
 }
 
+// NewHandlerWithAnalytics creates a new AG-UI HTTP handler with analytics.
+func NewHandlerWithAnalytics(runFunc RunFunc, store *analytics.Store) *Handler {
+	return &Handler{
+		runFunc:  runFunc,
+		runs:     make(map[string]*RunState),
+		analytics: store,
+	}
+}
+
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
@@ -70,12 +83,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleRun(w, r)
+	case "/ws":
+		h.handleWebSocket(w, r)
 	case "/runs":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		h.handleListRuns(w, r)
+	case "/dashboard":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleDashboard(w, r)
+	case "/events":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleQueryEvents(w, r)
+	case "/analytics":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleAnalyticsSummary(w, r)
 	case "/health":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -229,4 +262,66 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version": "v1alpha",
 		"protocol": "ag-ui",
 	})
+}
+
+// handleDashboard returns the real-time analytics dashboard.
+func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if h.analytics == nil {
+		http.Error(w, "analytics not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	dash := h.analytics.GetDashboard()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(dash)
+}
+
+// handleQueryEvents returns events matching query parameters.
+// Query params: agent, thread_id, run_id, event_type, limit, since (RFC3339).
+func (h *Handler) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
+	if h.analytics == nil {
+		http.Error(w, "analytics not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := analytics.EventQuery{
+		Agent:     r.URL.Query().Get("agent"),
+		ThreadID:  r.URL.Query().Get("thread_id"),
+		RunID:     r.URL.Query().Get("run_id"),
+		EventType: r.URL.Query().Get("event_type"),
+	}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil {
+			query.Limit = limit
+		}
+	}
+
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if since, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			query.Since = since
+		}
+	}
+
+	events := h.analytics.QueryEvents(query)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"events": events,
+		"total":  len(events),
+	})
+}
+
+// handleAnalyticsSummary returns a summary of analytics data.
+func (h *Handler) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
+	if h.analytics == nil {
+		http.Error(w, "analytics not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	summary := map[string]interface{}{
+		"total_tokens":  h.analytics.GetTotalTokens(),
+		"total_cost_usd": h.analytics.GetTotalCost(),
+		"event_count":   h.analytics.Size(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
 }

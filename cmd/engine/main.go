@@ -18,6 +18,7 @@ import (
 	"github.com/0xsaurabhx/GoPilotKit/internal/config"
 	"github.com/0xsaurabhx/GoPilotKit/internal/protocol/agui"
 	"github.com/0xsaurabhx/GoPilotKit/internal/runtime"
+	"github.com/0xsaurabhx/GoPilotKit/internal/store/analytics"
 	"github.com/spf13/cobra"
 )
 
@@ -125,10 +126,29 @@ func runServer(cfg *config.IntelligenceConfig) error {
 		log.Printf("registered agent: %s (provider=%s)", agent.Name, agent.Provider)
 	}
 
+	// Initialize analytics store if enabled.
+	var analyticsStore *analytics.Store
+	if cfg.Analytics.Enabled {
+		analyticsStore = analytics.NewStore(analytics.Config{
+			Enabled:       true,
+			OTLPEndpoint:  cfg.Telemetry.Endpoint,
+			RetentionDays: 30,
+			MaxEvents:     100000,
+		})
+		log.Printf("analytics store initialized (retention=30d, max_events=100000)")
+	}
+
 	// Create the AG-UI HTTP handler backed by the coordinator.
-	aguiHandler := agui.NewHandler(func(req agui.RunRequest, stream *agui.RunStream) {
-		coord.ExecuteRun(context.Background(), req, stream)
-	})
+	var aguiHandler *agui.Handler
+	if analyticsStore != nil {
+		aguiHandler = agui.NewHandlerWithAnalytics(func(req agui.RunRequest, stream *agui.RunStream) {
+			coord.ExecuteRun(context.Background(), req, stream)
+		}, analyticsStore)
+	} else {
+		aguiHandler = agui.NewHandler(func(req agui.RunRequest, stream *agui.RunStream) {
+			coord.ExecuteRun(context.Background(), req, stream)
+		})
+	}
 
 	// Set up HTTP server.
 	mux := http.NewServeMux()
@@ -136,8 +156,32 @@ func runServer(cfg *config.IntelligenceConfig) error {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	fmt.Printf("  AG-UI:      http://localhost%s/run\n", addr)
+	fmt.Printf("  WebSocket:  ws://localhost%s/ws\n", addr)
 	fmt.Printf("  Health:     http://localhost%s/health\n", addr)
 	fmt.Printf("  Runs:       http://localhost%s/runs\n", addr)
+	if analyticsStore != nil {
+		fmt.Printf("  Dashboard:  http://localhost%s/dashboard\n", addr)
+		fmt.Printf("  Events:     http://localhost%s/events\n", addr)
+		fmt.Printf("  Analytics:  http://localhost%s/analytics\n", addr)
+	}
+	fmt.Println()
+
+	// Start gRPC server if grpc transport is enabled.
+	var grpcSrv *agui.GRPCServer
+	for _, t := range cfg.Server.Transport {
+		if t == "grpc" {
+			grpcAddr := fmt.Sprintf(":%d", cfg.Server.Port+1)
+			grpcSrv = agui.NewGRPCServer(func(req agui.RunRequest, stream *agui.RunStream) {
+				coord.ExecuteRun(context.Background(), req, stream)
+			}, aguiHandler)
+			if err := grpcSrv.Start(grpcAddr); err != nil {
+				return fmt.Errorf("starting gRPC server: %w", err)
+			}
+			fmt.Printf("  gRPC:       localhost%s\n", grpcAddr)
+			break
+		}
+	}
+
 	fmt.Println()
 	fmt.Println("Press Ctrl+C to stop.")
 
@@ -153,6 +197,9 @@ func runServer(cfg *config.IntelligenceConfig) error {
 	go func() {
 		<-quit
 		fmt.Println("\nShutting down...")
+		if grpcSrv != nil {
+			grpcSrv.Stop()
+		}
 		server.Shutdown(context.Background())
 	}()
 

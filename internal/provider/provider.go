@@ -143,6 +143,12 @@ func New(cfg ProviderConfig) (Provider, error) {
 		return NewAnthropic(cfg)
 	case "ollama":
 		return NewOllama(cfg)
+	case "google":
+		return NewGoogle(cfg)
+	case "mistral":
+		return NewMistral(cfg)
+	case "cohere":
+		return NewCohere(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", cfg.Type)
 	}

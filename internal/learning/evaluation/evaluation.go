@@ -12,14 +12,14 @@ import (
 
 // EvalResult represents the evaluation of a single response.
 type EvalResult struct {
-	RunID       string    `json:"run_id"`
-	Agent       string    `json:"agent"`
-	Score       float64   `json:"score"`       // 0.0 to 1.0
+	RunID       string          `json:"run_id"`
+	Agent       string          `json:"agent"`
+	Score       float64         `json:"score"`        // 0.0 to 1.0
 	Dimensions  []DimensionScore `json:"dimensions"`
-	Passed      bool      `json:"passed"`       // Whether it meets quality threshold
-	Regression  bool      `json:"regression"`   // Whether this is a regression from baseline
-	Notes       string    `json:"notes,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	Passed      bool            `json:"passed"`        // Whether it meets quality threshold
+	Regression  bool            `json:"regression"`    // Whether this is a regression from baseline
+	Notes       string          `json:"notes,omitempty"`
+	Timestamp   time.Time       `json:"timestamp"`
 }
 
 // DimensionScore scores a specific quality dimension.
@@ -31,10 +31,10 @@ type DimensionScore struct {
 
 // EvalConfig configures the evaluation engine.
 type EvalConfig struct {
-	QualityThreshold float64 `json:"quality_threshold"` // Min score to pass (0-1)
-	LLMAsJudge       bool    `json:"llm_as_judge"`      // Use LLM for scoring
-	RegressionTest   bool    `json:"regression_testing"` // Enable regression detection
-	Dimensions       []string `json:"dimensions"`        // Quality dimensions to evaluate
+	QualityThreshold float64  `json:"quality_threshold"` // Min score to pass (0-1)
+	LLMAsJudge       bool     `json:"llm_as_judge"`      // Use LLM for scoring
+	RegressionTest   bool     `json:"regression_testing"` // Enable regression detection
+	Dimensions       []string `json:"dimensions"`         // Quality dimensions to evaluate
 }
 
 // DefaultEvalConfig returns default evaluation configuration.
@@ -49,7 +49,7 @@ func DefaultEvalConfig() EvalConfig {
 
 // Engine evaluates agent responses.
 type Engine struct {
-	config   EvalConfig
+	config    EvalConfig
 	baselines map[string]float64 // agent → baseline score
 }
 
