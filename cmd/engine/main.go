@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "dev"
+var version = "dev" // Set via -ldflags at build time: -X main.version=v0.8.0
 
 func main() {
 	rootCmd := newRootCmd()

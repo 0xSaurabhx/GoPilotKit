@@ -7,7 +7,8 @@ MODULE := github.com/0xsaurabhx/GoPilotKit
 
 # Go build settings — zero CGO, stripped, trimmed
 GOFLAGS := CGO_ENABLED=0
-LDFLAGS := -ldflags="-s -w"
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -ldflags="-s -w -X main.version=$(VERSION)"
 TRIMPATH := -trimpath
 
 # Default target
