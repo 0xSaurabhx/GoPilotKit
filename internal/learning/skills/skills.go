@@ -52,7 +52,12 @@ func NewEngine() *Engine {
 }
 
 // RecordSkill records a new skill from a demonstration.
+// It returns a copy of the recorded skill so callers never share memory
+// that is mutated under the engine's lock.
 func (e *Engine) RecordSkill(agent, name, description, category string, steps []SkillStep) *Skill {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.counter++
 	skill := Skill{
 		ID:          fmt.Sprintf("skill_%d", e.counter),
@@ -65,7 +70,9 @@ func (e *Engine) RecordSkill(agent, name, description, category string, steps []
 		CreatedAt:   time.Now().UTC(),
 	}
 	e.skills[agent] = append(e.skills[agent], skill)
-	return &e.skills[agent][len(e.skills[agent])-1]
+
+	recorded := e.skills[agent][len(e.skills[agent])-1]
+	return &recorded
 }
 
 // FindSkills finds skills matching a query pattern.
